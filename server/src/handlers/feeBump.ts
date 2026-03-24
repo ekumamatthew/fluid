@@ -1,6 +1,7 @@
-import { Request, Response } from "express";
 import StellarSdk from "@stellar/stellar-sdk";
+import { Request, Response } from "express";
 import { Config } from "../config";
+import { transactionStore } from "../workers/transactionStore";
 
 interface FeeBumpRequest {
   xdr: string;
@@ -17,7 +18,7 @@ interface FeeBumpResponse {
 export function feeBumpHandler(
   req: Request,
   res: Response,
-  config: Config
+  config: Config,
 ): void {
   try {
     const body: FeeBumpRequest = req.body;
@@ -33,7 +34,7 @@ export function feeBumpHandler(
     try {
       innerTransaction = StellarSdk.TransactionBuilder.fromXDR(
         body.xdr,
-        config.networkPassphrase
+        config.networkPassphrase,
       );
     } catch (error: any) {
       console.error("Failed to parse XDR:", error.message);
@@ -51,7 +52,7 @@ export function feeBumpHandler(
       return;
     }
 
-    if ('feeBumpTransaction' in innerTransaction) {
+    if ("feeBumpTransaction" in innerTransaction) {
       res.status(400).json({
         error: "Cannot fee-bump an already fee-bumped transaction",
       });
@@ -61,14 +62,14 @@ export function feeBumpHandler(
     const feeAmount = Math.floor(config.baseFee * config.feeMultiplier);
 
     const feePayerKeypair = StellarSdk.Keypair.fromSecret(
-      config.feePayerSecret
+      config.feePayerSecret,
     );
 
     const feeBumpTx = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
       feePayerKeypair,
       feeAmount,
       innerTransaction,
-      config.networkPassphrase
+      config.networkPassphrase,
     );
 
     feeBumpTx.sign(feePayerKeypair);
@@ -85,6 +86,9 @@ export function feeBumpHandler(
       server
         .submitTransaction(feeBumpTx)
         .then((result: any) => {
+          // Track the submitted transaction
+          transactionStore.addTransaction(result.hash, "submitted");
+
           const response: FeeBumpResponse = {
             xdr: feeBumpXdr,
             status: "submitted",
