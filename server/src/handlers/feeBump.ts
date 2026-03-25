@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import StellarSdk from "@stellar/stellar-sdk";
-import { Config } from "../config";
+import { Config, pickFeePayerAccount } from "../config";
 import { FeeBumpSchema, FeeBumpRequest } from "../schemas/feeBump";
 import { ApiKeyConfig } from "../middleware/apiKeys";
 import { syncTenantFromApiKey } from "../models/tenantStore";
@@ -8,13 +8,7 @@ import { recordSponsoredTransaction } from "../models/transactionLedger";
 import { checkTenantDailyQuota } from "../services/quota";
 import { transactionStore } from "../workers/transactionStore";
 import { AppError } from "../errors/AppError";
-
 import { calculateFeeBumpFee } from "../utils/feeCalculator";
-interface FeeBumpRequest {
-  xdr: string;
-  submit?: boolean;
-  token?: string;
-}
 
 interface FeeBumpResponse {
   xdr: string;
@@ -44,12 +38,13 @@ export async function feeBumpHandler(
           "INVALID_XDR"
         )
       );
-      
-      const body: FeeBumpRequest = req.body;
-      if (!body.xdr) {
-        res.status(400).json({ error: "Missing 'xdr' field in request body" });
-        return;
-      }
+    }
+
+    const body: FeeBumpRequest = req.body;
+    if (!body.xdr) {
+      return next(
+        new AppError("Missing 'xdr' field in request body", 400, "INVALID_XDR")
+      );
     }
 
     // Pick a fee payer account using Round Robin
@@ -90,7 +85,23 @@ export async function feeBumpHandler(
       );
     }
 
-    const feeAmount = Math.floor(config.baseFee * config.feeMultiplier);
+    // Extract operation count safely
+    const operationCount = innerTransaction.operations?.length || 0;
+
+    // Use extracted utility for correct fee calculation
+    const feeAmount = calculateFeeBumpFee(
+      operationCount,
+      config.baseFee,
+      config.feeMultiplier,
+    );
+
+    console.log("Fee calculation:", {
+      operationCount,
+      baseFee: config.baseFee,
+      multiplier: config.feeMultiplier,
+      finalFee: feeAmount,
+    });
+
     const apiKeyConfig = res.locals.apiKey as ApiKeyConfig | undefined;
 
     if (!apiKeyConfig) {
@@ -112,25 +123,9 @@ export async function feeBumpHandler(
       });
       return;
     }
-    // Extract operation count safely
-    const operationCount = innerTransaction.operations?.length || 0;
-
-    // Use extracted utility for correct fee calculation
-    const feeAmount = calculateFeeBumpFee(
-      operationCount,
-      config.baseFee,
-      config.feeMultiplier,
-    );
-
-    console.log("Fee calculation:", {
-      operationCount,
-      baseFee: config.baseFee,
-      multiplier: config.feeMultiplier,
-      finalFee: feeAmount,
-    });
 
     const feePayerKeypair = StellarSdk.Keypair.fromSecret(
-      config.feePayerSecret,
+      feePayerAccount.secret,
     );
 
     const feeBumpTx = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
@@ -176,7 +171,6 @@ export async function feeBumpHandler(
             )
           );
         });
-      }
     } else {
       const response: FeeBumpResponse = {
         xdr: feeBumpXdr,
