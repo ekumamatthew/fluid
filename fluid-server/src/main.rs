@@ -3,6 +3,7 @@ mod error;
 mod state;
 mod stellar;
 mod xdr;
+mod sequence_manager;
 
 use std::net::SocketAddr;
 
