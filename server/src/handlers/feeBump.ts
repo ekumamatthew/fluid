@@ -1,5 +1,5 @@
-import { NextFunction, Request, Response } from "express";
 import StellarSdk, { Transaction } from "@stellar/stellar-sdk";
+import { NextFunction, Request, Response } from "express";
 import { Config, pickFeePayerAccount } from "../config";
 import { AppError } from "../errors/AppError";
 import { ApiKeyConfig } from "../middleware/apiKeys";
@@ -19,7 +19,7 @@ interface FeeBumpResponse {
   submission_attempts?: number;
 }
 
-export async function feeBumpHandler (
+export async function feeBumpHandler(
   req: Request,
   res: Response,
   config: Config,
@@ -63,7 +63,10 @@ export async function feeBumpHandler (
       );
     }
 
-    if (!innerTransaction.signatures || innerTransaction.signatures.length === 0) {
+    if (
+      !innerTransaction.signatures ||
+      innerTransaction.signatures.length === 0
+    ) {
       return next(
         new AppError(
           "Inner transaction must be signed before fee-bumping",
@@ -90,6 +93,32 @@ export async function feeBumpHandler (
       config.feeMultiplier,
     );
 
+    // Verify settlement payment if token is specified
+    const settlementRequirement = extractSettlementRequirement(
+      body.token,
+      feeAmount,
+    );
+    if (settlementRequirement) {
+      const settlementVerification = verifySettlementPayment(
+        innerTransaction,
+        settlementRequirement,
+        config,
+      );
+
+      if (!settlementVerification.isValid) {
+        console.error(
+          `Settlement verification failed: ${settlementVerification.reason}`,
+        );
+        return next(
+          new AppError(
+            `Settlement verification failed: ${settlementVerification.reason}`,
+            400,
+            "SETTLEMENT_VERIFICATION_FAILED",
+          ),
+        );
+      }
+    }
+
     const apiKeyConfig = res.locals.apiKey as ApiKeyConfig | undefined;
     if (!apiKeyConfig) {
       res.status(500).json({
@@ -109,6 +138,13 @@ export async function feeBumpHandler (
       });
       return;
     }
+
+    // Preflight simulation for Soroban transactions
+    const isSoroban = innerTransaction.operations.some((op: any) =>
+      ["invokeHostFunction", "extendFootprintTtl", "restoreFootprint"].includes(
+        op.type,
+      ),
+    );
 
     const feeBumpTx = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
       feePayerAccount.keypair,

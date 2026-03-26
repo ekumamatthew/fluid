@@ -164,6 +164,23 @@ export function loadConfig(): Config {
   const slackWebhookUrl = process.env.FLUID_ALERT_SLACK_WEBHOOK_URL?.trim() || undefined;
   const email = loadAlertEmailConfig();
 
+  
+  const sharedConfig = {
+    allowedOrigins,
+    baseFee,
+    feeMultiplier,
+    horizonSelectionStrategy,
+    horizonUrl: horizonUrls[0],
+    horizonUrls,
+    maxOperations,
+    maxXdrSize,
+    networkPassphrase,
+    rateLimitMax,
+    rateLimitWindowMs,
+    stellarRpcUrl: process.env.STELLAR_RPC_URL,
+    vault,
+  };
+  
   const vaultSecretPaths = parseCommaSeparatedList(process.env.FLUID_FEE_PAYER_VAULT_SECRET_PATHS);
   const vaultPublicKeys = parseCommaSeparatedList(process.env.FLUID_FEE_PAYER_PUBLIC_KEYS);
 
