@@ -1,4 +1,4 @@
-use fluid_server::error::AppError;
+use crate::error::AppError;
 use axum::http::StatusCode;
 
 #[derive(Clone, Copy)]
