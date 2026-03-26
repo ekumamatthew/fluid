@@ -2,6 +2,8 @@ import { auth } from "@/auth";
 import Link from "next/link";
 import { SignersTable, TransactionsTable } from "@/components/dashboard/ResponsiveTables";
 import { getDashboardPageData } from "@/lib/dashboard-data";
+import { StatCard } from "@/components/dashboard/StatCard";
+import { Coins, CheckCircle, Wallet, Zap } from "lucide-react";
 
 export default async function AdminDashboard() {
   const session = await auth();
@@ -40,19 +42,31 @@ export default async function AdminDashboard() {
       </div>
 
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <section className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">Tracked Transactions</p>
-            <p className="mt-2 text-3xl font-bold text-slate-900">{transactions.length}</p>
-          </div>
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">Signer Accounts</p>
-            <p className="mt-2 text-3xl font-bold text-slate-900">{signers.length}</p>
-          </div>
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">Mobile UX</p>
-            <p className="mt-2 text-3xl font-bold text-slate-900">Expandable</p>
-          </div>
+        <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <StatCard
+            title="Total XLM Sponsored"
+            value="1,250,000"
+            delta="+5% from last week"
+            icon={Coins}
+          />
+          <StatCard
+            title="Successful Transactions"
+            value="45,678"
+            delta="+12% from last week"
+            icon={CheckCircle}
+          />
+          <StatCard
+            title="Available Balance"
+            value="500,000 XLM"
+            delta="-2% from last week"
+            icon={Wallet}
+          />
+          <StatCard
+            title="Current TPS"
+            value="12.5"
+            delta="+8% from last week"
+            icon={Zap}
+          />
         </section>
 
         <section className="mt-6 space-y-6">
