@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
 use state::{
     iso_now, utc_day_start_ms, ApiKeyConfig, AppState, HealthFeePayer, HorizonNodeStatus,
-    RateLimitEntry, RateLimitResult, TransactionRecord, API_KEYS,
+    RateLimitEntry, RateLimitResult, TransactionRecord, API_KEYS, REVALIDATION_INTERVAL_SECS,
 };
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
@@ -167,6 +167,25 @@ async fn run() -> Result<(), AppError> {
     let port = config.port;
     let allowed_origins = config.allowed_origins.clone();
     let state = AppState::new(config, &secrets)?;
+
+    // Background task: periodically revalidate signer accounts and refresh balances
+    {
+        let pool = Arc::clone(&state.signer_pool);
+        let horizon_urls = state.config.horizon_urls.clone();
+        let client = reqwest::Client::new();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(REVALIDATION_INTERVAL_SECS));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                if let Some(url) = horizon_urls.first() {
+                    info!("[LoadBalancer] Running signer pool revalidation");
+                    pool.revalidate(url, &client).await;
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(dashboard))
@@ -370,16 +389,23 @@ async fn fee_bump_inner(
 
     let signer_lease = state.signer_pool.acquire().await?;
     let fee_payer = signer_lease.account.public_key.clone();
+    let signer_index = signer_lease.index;
     info!("Received fee-bump request | fee_payer: {fee_payer}");
 
-    let result = stellar::create_fee_bump_transaction(
+    let result = match stellar::create_fee_bump_transaction(
         &body.xdr,
         &state.config.network_passphrase,
         state.config.base_fee,
         state.config.fee_multiplier,
         &signer_lease.account.secret,
         &signer_lease.account.public_key_bytes,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            signer_lease.release().await;
+            return Err(err);
+        }
+    };
     xdr::log_xdr_breakdown(&result.parsed_inner);
 
     let summary = summarize_transaction(&result.parsed_inner);
@@ -447,10 +473,20 @@ async fn fee_bump_inner(
         ));
     }
 
-    let submission = state
-        .horizon
-        .submit_transaction(&result.fee_bump_xdr)
-        .await?;
+    let submission = match state.horizon.submit_transaction(&result.fee_bump_xdr).await {
+        Ok(submission) => {
+            state.signer_pool.report_success(signer_index).await;
+            submission
+        }
+        Err(err) => {
+            state
+                .signer_pool
+                .report_failure(signer_index, &err.message)
+                .await;
+            signer_lease.release().await;
+            return Err(err);
+        }
+    };
     let now = iso_now();
     state.transaction_store.lock().await.insert(
         submission.hash.clone(),

@@ -1,6 +1,8 @@
 import { NextFunction, Request, Response } from "express";
 import { ApiKeyConfig, maskApiKey } from "./apiKeys";
+import { incrWithExpiry } from "../utils/redis";
 
+// Fallback in-memory bucket if Redis is unavailable.
 interface UsageEntry {
   count: number;
   resetTime: number;
@@ -25,11 +27,11 @@ function getUsageEntry(apiKeyConfig: ApiKeyConfig): UsageEntry {
   return existingEntry;
 }
 
-export function apiKeyRateLimit(
+export async function apiKeyRateLimit(
   req: Request,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const apiKeyConfig = res.locals.apiKey as ApiKeyConfig | undefined;
 
   if (!apiKeyConfig) {
@@ -39,6 +41,39 @@ export function apiKeyRateLimit(
     return;
   }
 
+  const windowSeconds = Math.max(1, Math.ceil(apiKeyConfig.windowMs / 1000));
+
+  // Try Redis atomic counter first.
+  try {
+    const key = `rl:${apiKeyConfig.key}`;
+    const result = await incrWithExpiry(key, windowSeconds);
+
+    if (result) {
+      const { count, ttl } = result;
+
+      res.setHeader("X-RateLimit-Limit", apiKeyConfig.maxRequests.toString());
+      res.setHeader("X-RateLimit-Remaining", Math.max(apiKeyConfig.maxRequests - count, 0).toString());
+      res.setHeader("X-RateLimit-Reset", Math.ceil((Date.now() / 1000) + ttl).toString());
+
+      if (count > apiKeyConfig.maxRequests) {
+        res.status(429).json({
+          error: `API key rate limit exceeded for ${maskApiKey(apiKeyConfig.key)} (${apiKeyConfig.tier} tier).`,
+          tier: apiKeyConfig.tier,
+          limit: apiKeyConfig.maxRequests,
+          retryAfterSeconds: Math.max(ttl, 0),
+        });
+        return;
+      }
+
+      // allowed
+      next();
+      return;
+    }
+  } catch (err) {
+    // If Redis helper threw, we'll fall back to in-memory below.
+  }
+
+  // Fallback to in-memory windowing if Redis is unavailable
   const usageEntry = getUsageEntry(apiKeyConfig);
   const now = Date.now();
 
@@ -47,20 +82,14 @@ export function apiKeyRateLimit(
     "X-RateLimit-Remaining",
     Math.max(apiKeyConfig.maxRequests - usageEntry.count - 1, 0).toString()
   );
-  res.setHeader(
-    "X-RateLimit-Reset",
-    Math.ceil(usageEntry.resetTime / 1000).toString()
-  );
+  res.setHeader("X-RateLimit-Reset", Math.ceil(usageEntry.resetTime / 1000).toString());
 
   if (usageEntry.count >= apiKeyConfig.maxRequests) {
     res.status(429).json({
       error: `API key rate limit exceeded for ${maskApiKey(apiKeyConfig.key)} (${apiKeyConfig.tier} tier).`,
       tier: apiKeyConfig.tier,
       limit: apiKeyConfig.maxRequests,
-      retryAfterSeconds: Math.max(
-        Math.ceil((usageEntry.resetTime - now) / 1000),
-        0
-      ),
+      retryAfterSeconds: Math.max(Math.ceil((usageEntry.resetTime - now) / 1000), 0),
     });
     return;
   }

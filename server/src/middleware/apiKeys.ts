@@ -1,6 +1,11 @@
 import { NextFunction, Request, Response } from "express";
 import { AppError } from "../errors/AppError";
 import prisma from "../utils/db";
+import {
+  getCachedApiKey,
+  setCachedApiKey,
+  invalidateApiKeyCache,
+} from "../utils/redis";
 
 export interface ApiKeyConfig {
   key: string;
@@ -11,6 +16,8 @@ export interface ApiKeyConfig {
   windowMs: number;
   dailyQuotaStroops: number;
 }
+
+const API_KEYS = new Map<string, ApiKeyConfig>();
 
 function getApiKeyFromHeader(req: Request): string | undefined {
   const headerValue = req.header("x-api-key");
@@ -24,10 +31,10 @@ export function maskApiKey(apiKey: string): string {
   return `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
 }
 
-async function validateApiKey(
+export async function apiKeyMiddleware(
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ): Promise<void> {
   const apiKey = getApiKeyFromHeader(req);
 
@@ -36,37 +43,93 @@ async function validateApiKey(
       new AppError(
         "Missing API key. Provide a valid x-api-key header to access this endpoint.",
         401,
-        "AUTH_FAILED"
-      )
+        "AUTH_FAILED",
+      ),
     );
   }
 
-  const keyRecord = await prisma.apiKey.findUnique({
-    where: { key: apiKey },
-  });
+  // 1) Try Redis cache first
+  try {
+    const cached = await getCachedApiKey(apiKey);
+    if (cached) {
+      // Cache stores the ApiKeyConfig as a JSON string
+      // eslint-disable-next-line no-console
+      console.log("[Redis] Cache Hit for API key:", maskApiKey(apiKey));
 
-  if (!keyRecord) {
+      res.locals.apiKey = JSON.parse(cached) as ApiKeyConfig;
+      return next();
+    }
+  } catch (err) {
+    // If Redis fails, fall back to DB/in-memory lookup below.
+  }
+
+  // 2) Try DB (Prisma) lookup
+  try {
+    const keyRecord = await prisma.apiKey.findUnique({
+      where: { key: apiKey },
+    });
+
+    if (keyRecord) {
+      const apiKeyConfig: ApiKeyConfig = {
+        key: keyRecord.key,
+        tenantId: keyRecord.tenantId,
+        name: keyRecord.name,
+        tier: keyRecord.tier as "free" | "pro",
+        maxRequests: keyRecord.maxRequests,
+        windowMs: keyRecord.windowMs,
+        dailyQuotaStroops: Number(keyRecord.dailyQuotaStroops),
+      };
+
+      // Cache the key for future requests. Non-blocking: don't fail the request on cache errors.
+      setCachedApiKey(apiKey, JSON.stringify(apiKeyConfig), 300).catch(
+        () => {},
+      );
+
+      res.locals.apiKey = apiKeyConfig;
+      return next();
+    }
+  } catch (err) {
+    // DB error — continue to in-memory fallback
+  }
+
+  // 3) In-memory fallback (useful for local dev / tests)
+  const apiKeyConfig = API_KEYS.get(apiKey);
+
+  if (!apiKeyConfig) {
     return next(new AppError("Invalid API key.", 403, "AUTH_FAILED"));
   }
 
-  const apiKeyConfig: ApiKeyConfig = {
-    key: keyRecord.key,
-    tenantId: keyRecord.tenantId,
-    name: keyRecord.name,
-    tier: keyRecord.tier as "free" | "pro",
-    maxRequests: keyRecord.maxRequests,
-    windowMs: keyRecord.windowMs,
-    dailyQuotaStroops: Number(keyRecord.dailyQuotaStroops),
-  };
+  // Cache in Redis asynchronously for future hits
+  setCachedApiKey(apiKey, JSON.stringify(apiKeyConfig), 300).catch(() => {});
 
   res.locals.apiKey = apiKeyConfig;
   next();
 }
 
-export function apiKeyMiddleware(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  validateApiKey(req, res, next).catch(next);
+export function listApiKeys(): ApiKeyConfig[] {
+  return Array.from(API_KEYS.values());
+}
+
+// Expose an invalidate helper so other parts of the app can clear cache after updates.
+export async function invalidateCachedApiKey(apiKey: string): Promise<void> {
+  try {
+    await invalidateApiKeyCache(apiKey);
+  } catch (err) {
+    // ignore cache invalidation errors
+  }
+}
+
+// Allow programmatic upsert/delete of the in-memory API_KEYS map.
+export function upsertApiKey(apiKeyConfig: ApiKeyConfig): void {
+  API_KEYS.set(apiKeyConfig.key, apiKeyConfig);
+  // Also set cache so immediate requests will hit Redis
+  setCachedApiKey(apiKeyConfig.key, JSON.stringify(apiKeyConfig), 300).catch(
+    () => {},
+  );
+}
+
+export function deleteApiKey(key: string): void {
+  API_KEYS.delete(key);
+  // Also invalidate cache
+  invalidateApiKeyCache(key).catch(() => {});
 }
