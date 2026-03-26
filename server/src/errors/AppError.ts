@@ -8,7 +8,8 @@ export type ErrorCode =
   | "AUTH_FAILED"
   | "INTERNAL_ERROR"
   | "PAYLOAD_TOO_LARGE"
-  | "TOO_MANY_OPERATIONS";
+  | "TOO_MANY_OPERATIONS"
+  | "NETWORK_MISMATCH";
 
 export class AppError extends Error {
   public readonly statusCode: number;

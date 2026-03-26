@@ -14,6 +14,7 @@ import { nativeSigner } from "../signing/native";
 import { recordSponsoredTransaction } from "../models/transactionLedger";
 import { syncTenantFromApiKey } from "../models/tenantStore";
 import { transactionStore } from "../workers/transactionStore";
+import { verifyXdrNetwork } from "../utils/networkVerification";
 
 export const feeBumpLogger = createLogger({ component: "fee_bump_handler" });
 
@@ -105,6 +106,23 @@ export async function feeBumpHandler (
         );
         return next(
           new AppError(`Invalid XDR: ${error.message}`, 400, "INVALID_XDR")
+        );
+      }
+
+      // Verify network isolation - reject XDR if it doesn't match server's configured network
+      const networkVerification = verifyXdrNetwork(body.xdr, config.networkPassphrase);
+      if (!networkVerification.valid) {
+        feeBumpLogger.warn(
+          {
+            xdr_network: networkVerification.xdrNetwork,
+            expected_network: networkVerification.expectedNetwork,
+            fee_payer: feePayerAccount.publicKey,
+            tenant_id: tenant.id,
+          },
+          "Network mismatch: XDR is for a different network than the server"
+        );
+        return next(
+          new AppError(networkVerification.errorMessage || "Network mismatch", 400, "NETWORK_MISMATCH")
         );
       }
 
@@ -210,7 +228,7 @@ export async function feeBumpHandler (
       // For Soroban, the inner transaction fee includes resource fees returned by simulation.
       const feeAmount = Math.max(calculatedBaseFee, innerFee + config.baseFee);
 
-      const quotaCheck = checkTenantDailyQuota(tenant, feeAmount);
+      const quotaCheck = await checkTenantDailyQuota(tenant, feeAmount);
 
       if (!quotaCheck.allowed) {
         feeBumpLogger.warn(
